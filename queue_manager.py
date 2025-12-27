@@ -153,10 +153,20 @@ class QueueManager:
             )
 
             # 调用 New API 创建兑换码
+            # 兑换码名称长度必须在 1-20 之间，需要截断用户名
+            # 格式：用户名(最多14个字符)+每日码
+            max_username_len = 14  # "每日码" 占3个字符，总共不超过20
+            truncated_username = (
+                task.username[:max_username_len]
+                if len(task.username) > max_username_len
+                else task.username
+            )
+            redeem_name = f"{truncated_username}每日码"
+
             result = await newapi_service.create_redemption_code(
                 quota=task.quota,
                 count=1,
-                name=f"用户 {task.username} 每日兑换码",
+                name=redeem_name,
             )
 
             # 提取兑换码
