@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./redeem_codes.db"
     debug: bool = False
 
+    # New API 配置
+    newapi_site_url: str = ""  # New API 站点地址，例如 https://api.example.com
+    newapi_access_token: str = ""  # New API Access Token
+    newapi_redeem_quota: int = 500000  # 每次创建的兑换码额度（默认 500000 tokens）
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

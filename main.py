@@ -9,6 +9,7 @@ from config import settings
 from oauth2_service import oauth2_service
 from database import get_session, create_db_and_tables
 from models import RedeemCode, UserRedeemRecord
+from newapi_service import NewAPIService
 import secrets
 
 app = FastAPI(
@@ -176,11 +177,11 @@ async def claim_daily_code(
     session: AsyncSession = Depends(get_session),
 ):
     """
-    每日领取兑换码
+    每日领取兑换码（实时创建模式）
 
     规则：
     - 每个用户每天只能领取一次
-    - 兑换码从数据库中未使用的兑换码中随机分配
+    - 兑换码通过 New API 实时创建
     """
     try:
         # 获取用户信息
@@ -204,42 +205,59 @@ async def claim_daily_code(
                 status_code=400, detail="今天已经领取过兑换码了，请明天再来！"
             )
 
-        # 获取一个未使用的兑换码
-        available_code = await session.execute(
-            select(RedeemCode).where(RedeemCode.is_used == False).limit(1)
+        # 检查 New API 配置
+        if not settings.newapi_site_url or not settings.newapi_access_token:
+            raise HTTPException(
+                status_code=500,
+                detail="系统配置错误：New API 未配置。请联系管理员配置 NEWAPI_SITE_URL 和 NEWAPI_ACCESS_TOKEN 环境变量。",
+            )
+
+        # 实时创建兑换码
+        newapi_service = NewAPIService(
+            base_url=settings.newapi_site_url,
+            access_token=settings.newapi_access_token,
         )
 
-        code_obj = available_code.scalar_one_or_none()
-        if not code_obj:
-            raise HTTPException(status_code=404, detail="抱歉，兑换码已经发完了！")
+        result = await newapi_service.create_redemption_code(
+            quota=settings.newapi_redeem_quota,
+            count=1,
+            name=f"用户 {username} 每日兑换码",
+        )
 
-        # 标记兑换码为已使用
-        code_obj.is_used = True
-        code_obj.used_by = user_id
-        code_obj.used_at = datetime.now()
+        # 从返回结果中提取兑换码
+        if not result or "data" not in result:
+            raise HTTPException(
+                status_code=500, detail="创建兑换码失败：返回数据格式错误"
+            )
+
+        # New API 返回的数据格式可能是 data: [code1, code2, ...] 或其他格式
+        # 根据实际 API 返回调整
+        codes = result.get("data", [])
+        if not codes or len(codes) == 0:
+            raise HTTPException(status_code=500, detail="创建兑换码失败：未返回兑换码")
+
+        code = codes[0] if isinstance(codes, list) else str(codes)
 
         # 创建兑换记录
-        if code_obj.id is None:
-            raise HTTPException(status_code=500, detail="兑换码ID无效")
-
         record = UserRedeemRecord(
             user_id=user_id,
             username=username,
-            redeem_code_id=code_obj.id,
-            code=code_obj.code,
+            redeem_code_id=None,  # 实时创建的兑换码没有 ID
+            code=code,
+            source="newapi",
         )
 
         session.add(record)
         await session.commit()
-        await session.refresh(code_obj)
         await session.refresh(record)
 
         return {
             "success": True,
             "message": "领取成功！",
             "data": {
-                "code": code_obj.code,
+                "code": code,
                 "redeemed_at": record.redeemed_at.isoformat(),
+                "quota": settings.newapi_redeem_quota,
             },
         }
 

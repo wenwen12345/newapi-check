@@ -6,7 +6,7 @@ from sqlmodel import Field, SQLModel
 
 
 class RedeemCode(SQLModel, table=True):
-    """兑换码表"""
+    """兑换码表（已废弃，保留用于历史记录）"""
 
     __tablename__ = "redeem_codes"
 
@@ -26,6 +26,21 @@ class UserRedeemRecord(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(index=True, description="用户ID")
     username: str = Field(description="用户名")
-    redeem_code_id: int = Field(description="兑换码ID")
+    redeem_code_id: Optional[int] = Field(
+        default=None, description="兑换码ID（可为空）"
+    )
     code: str = Field(description="兑换码内容")
     redeemed_at: datetime = Field(default_factory=datetime.now, description="兑换时间")
+    source: str = Field(
+        default="newapi", description="来源：newapi=实时创建, legacy=预生成"
+    )
+    code: str = Field(description="兑换码内容")
+    redeemed_at: datetime = Field(default_factory=datetime.now, description="兑换时间")
+    source: str = Field(
+        default="newapi", description="来源：newapi=实时创建, legacy=预生成"
+    )
+    code: str = Field(description="兑换码内容")
+    redeemed_at: datetime = Field(default_factory=datetime.now, description="兑换时间")
+    source: str = Field(
+        default="newapi", description="来源：newapi=实时创建, legacy=预生成"
+    )
