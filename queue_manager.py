@@ -161,11 +161,19 @@ class QueueManager:
 
             # 提取兑换码
             if not result or "data" not in result:
-                raise Exception("返回数据格式错误")
+                import json
+
+                raise Exception(
+                    f"返回数据格式错误，原始数据: {json.dumps(result, ensure_ascii=False)}"
+                )
 
             codes = result.get("data", [])
             if not codes or len(codes) == 0:
-                raise Exception("未返回兑换码")
+                import json
+
+                raise Exception(
+                    f"未返回兑换码，原始数据: {json.dumps(result, ensure_ascii=False)}"
+                )
 
             code = codes[0] if isinstance(codes, list) else str(codes)
 
