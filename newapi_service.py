@@ -69,15 +69,16 @@ class NewAPIService:
                 data = response.json()
                 return data
             else:
-                error_msg = f"创建兑换码失败: HTTP {response.status_code}"
+                error_msg = f"创建兑换码失败: HTTP {response.status_code}\n"
                 try:
                     error_data = response.json()
-                    if "message" in error_data:
-                        error_msg = f"{error_msg} - {error_data['message']}"
-                    elif "detail" in error_data:
-                        error_msg = f"{error_msg} - {error_data['detail']}"
+                    # 返回完整的 JSON 响应
+                    import json
+
+                    error_msg += f"完整响应: {json.dumps(error_data, ensure_ascii=False, indent=2)}"
                 except:
-                    pass
+                    # 如果无法解析为 JSON，返回原始文本
+                    error_msg += f"响应内容: {response.text}"
                 raise Exception(error_msg)
 
     async def test_connection(self) -> bool:

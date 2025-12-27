@@ -10,6 +10,7 @@ from oauth2_service import oauth2_service
 from database import get_session, create_db_and_tables
 from models import RedeemCode, UserRedeemRecord
 from newapi_service import NewAPIService
+from queue_manager import queue_manager, TaskStatus
 import secrets
 
 app = FastAPI(
@@ -177,11 +178,11 @@ async def claim_daily_code(
     session: AsyncSession = Depends(get_session),
 ):
     """
-    每日领取兑换码（实时创建模式）
+    每日领取兑换码（队列模式）
 
     规则：
     - 每个用户每天只能领取一次
-    - 兑换码通过 New API 实时创建
+    - 兑换码通过队列异步创建，立即返回任务ID
     """
     try:
         # 获取用户信息
@@ -212,53 +213,19 @@ async def claim_daily_code(
                 detail="系统配置错误：New API 未配置。请联系管理员配置 NEWAPI_SITE_URL 和 NEWAPI_ACCESS_TOKEN 环境变量。",
             )
 
-        # 实时创建兑换码
-        newapi_service = NewAPIService(
-            base_url=settings.newapi_site_url,
-            access_token=settings.newapi_access_token,
-            api_user=settings.newapi_user,
-        )
-
-        result = await newapi_service.create_redemption_code(
-            quota=settings.newapi_redeem_quota,
-            count=1,
-            name=f"用户 {username} 每日兑换码",
-        )
-
-        # 从返回结果中提取兑换码
-        if not result or "data" not in result:
-            raise HTTPException(
-                status_code=500, detail="创建兑换码失败：返回数据格式错误"
-            )
-
-        # New API 返回的数据格式可能是 data: [code1, code2, ...] 或其他格式
-        # 根据实际 API 返回调整
-        codes = result.get("data", [])
-        if not codes or len(codes) == 0:
-            raise HTTPException(status_code=500, detail="创建兑换码失败：未返回兑换码")
-
-        code = codes[0] if isinstance(codes, list) else str(codes)
-
-        # 创建兑换记录
-        record = UserRedeemRecord(
+        # 添加任务到队列
+        task_id = await queue_manager.add_task(
             user_id=user_id,
             username=username,
-            redeem_code_id=None,  # 实时创建的兑换码没有 ID
-            code=code,
-            source="newapi",
+            quota=settings.newapi_redeem_quota,
         )
-
-        session.add(record)
-        await session.commit()
-        await session.refresh(record)
 
         return {
             "success": True,
-            "message": "领取成功！",
+            "message": "兑换码生成任务已加入队列",
             "data": {
-                "code": code,
-                "redeemed_at": record.redeemed_at.isoformat(),
-                "quota": settings.newapi_redeem_quota,
+                "task_id": task_id,
+                "status": "pending",
             },
         }
 
@@ -266,6 +233,98 @@ async def claim_daily_code(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"领取失败: {str(e)}")
+
+
+@app.get("/api/task/{task_id}")
+async def get_task_status(
+    task_id: str,
+    access_token: str = Query(..., description="访问令牌"),
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    查询任务状态
+
+    当任务完成后,会自动将兑换码保存到数据库
+    """
+    try:
+        # 获取用户信息
+        user_info = await oauth2_service.get_user_info(access_token)
+        user_id = user_info["id"]
+
+        # 获取任务信息
+        task = await queue_manager.get_task(task_id)
+
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+
+        # 验证任务所有权
+        if task.user_id != user_id:
+            raise HTTPException(status_code=403, detail="无权访问此任务")
+
+        response_data = {
+            "task_id": task.task_id,
+            "status": task.status.value,
+            "created_at": task.created_at.isoformat(),
+        }
+
+        if task.started_at:
+            response_data["started_at"] = task.started_at.isoformat()
+
+        if task.status == TaskStatus.COMPLETED:
+            response_data["completed_at"] = task.completed_at.isoformat()
+            response_data["code"] = task.result
+
+            # 如果任务完成,保存到数据库
+            existing = await session.execute(
+                select(UserRedeemRecord)
+                .where(UserRedeemRecord.user_id == user_id)
+                .where(UserRedeemRecord.code == task.result)
+            )
+
+            if not existing.scalar_one_or_none():
+                record = UserRedeemRecord(
+                    user_id=user_id,
+                    username=task.username,
+                    redeem_code_id=None,
+                    code=task.result,
+                    source="newapi_queue",
+                )
+                session.add(record)
+                await session.commit()
+
+        elif task.status == TaskStatus.FAILED:
+            response_data["completed_at"] = task.completed_at.isoformat()
+            response_data["error"] = task.error
+
+        return {
+            "success": True,
+            "data": response_data,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询任务失败: {str(e)}")
+
+
+@app.get("/api/queue/info")
+async def get_queue_info(
+    access_token: str = Query(..., description="访问令牌"),
+):
+    """获取队列信息"""
+    try:
+        # 验证用户身份
+        await oauth2_service.get_user_info(access_token)
+
+        queue_info = queue_manager.get_queue_info()
+
+        return {
+            "success": True,
+            "data": queue_info,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取队列信息失败: {str(e)}")
 
 
 @app.get("/api/redeem/history")
@@ -448,7 +507,7 @@ async def redeem_page(user_id: int = Query(None, description="用户ID")):
                 }}
                 
                 btn.disabled = true;
-                btn.textContent = '领取中...';
+                btn.textContent = '提交中...';
                 
                 try {{
                     const response = await fetch(`/api/redeem/daily?access_token=${{encodeURIComponent(accessToken)}}`, {{
@@ -458,21 +517,84 @@ async def redeem_page(user_id: int = Query(None, description="用户ID")):
                     const data = await response.json();
                     
                     if (data.success) {{
-                        showResult('success', `
-                            <p>✅ ${{data.message}}</p>
-                            <div class="code-display">${{data.data.code}}</div>
-                            <p>领取时间：${{new Date(data.data.redeemed_at).toLocaleString('zh-CN')}}</p>
-                        `);
-                        loadHistory();
+                        // 任务已提交到队列，开始轮询状态
+                        const taskId = data.data.task_id;
+                        showResult('success', `<p>⏳ 任务已提交，正在生成兑换码...</p>`);
+                        btn.textContent = '生成中...';
+                        
+                        // 轮询任务状态
+                        await pollTaskStatus(taskId, btn);
                     }} else {{
-                        showResult('error', data.detail || '领取失败');
+                        showResult('error', data.detail || '提交失败');
+                        btn.disabled = false;
+                        btn.textContent = '领取今日兑换码';
                     }}
                 }} catch (error) {{
                     showResult('error', '网络错误，请重试');
-                }} finally {{
                     btn.disabled = false;
                     btn.textContent = '领取今日兑换码';
                 }}
+            }}
+            
+            async function pollTaskStatus(taskId, btn) {{
+                const maxAttempts = 60; // 最多轮询60次
+                const interval = 1000; // 每秒轮询一次
+                let attempts = 0;
+                
+                const poll = async () => {{
+                    try {{
+                        const response = await fetch(`/api/task/${{taskId}}?access_token=${{encodeURIComponent(accessToken)}}`);
+                        const data = await response.json();
+                        
+                        if (data.success) {{
+                            const status = data.data.status;
+                            
+                            if (status === 'completed') {{
+                                // 任务完成
+                                showResult('success', `
+                                    <p>✅ 领取成功！</p>
+                                    <div class="code-display">${{data.data.code}}</div>
+                                    <p>完成时间：${{new Date(data.data.completed_at).toLocaleString('zh-CN')}}</p>
+                                `);
+                                btn.disabled = false;
+                                btn.textContent = '领取今日兑换码';
+                                loadHistory();
+                                return;
+                            }} else if (status === 'failed') {{
+                                // 任务失败
+                                showResult('error', `生成失败：${{data.data.error || '未知错误'}}`);
+                                btn.disabled = false;
+                                btn.textContent = '领取今日兑换码';
+                                return;
+                            }} else if (status === 'processing') {{
+                                showResult('success', `<p>⚙️ 正在生成兑换码，请稍候...</p>`);
+                            }}
+                        }}
+                        
+                        // 继续轮询
+                        attempts++;
+                        if (attempts < maxAttempts) {{
+                            setTimeout(poll, interval);
+                        }} else {{
+                            showResult('error', '任务超时，请稍后查看历史记录');
+                            btn.disabled = false;
+                            btn.textContent = '领取今日兑换码';
+                        }}
+                    }} catch (error) {{
+                        console.error('轮询失败:', error);
+                        attempts++;
+                        if (attempts < maxAttempts) {{
+                            setTimeout(poll, interval);
+                        }} else {{
+                            showResult('error', '网络错误，请稍后查看历史记录');
+                            btn.disabled = false;
+                            btn.textContent = '领取今日兑换码';
+                        }}
+                    }}
+                }};
+                
+                // 开始轮询
+                poll();
             }}
             
             async function loadHistory() {{
@@ -522,8 +644,15 @@ async def redeem_page(user_id: int = Query(None, description="用户ID")):
 
 @app.on_event("startup")
 async def startup_event():
-    """应用启动时创建数据库表"""
+    """应用启动时创建数据库表并启动队列"""
     create_db_and_tables()
+    await queue_manager.start_workers()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时停止队列"""
+    await queue_manager.stop_workers()
 
 
 if __name__ == "__main__":
