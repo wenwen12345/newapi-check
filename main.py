@@ -1,0 +1,513 @@
+"""FastAPI 应用主文件 - Linux.do OAuth2 登录集成"""
+
+from datetime import datetime, timedelta
+from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi.responses import RedirectResponse, HTMLResponse
+from sqlmodel import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from config import settings
+from oauth2_service import oauth2_service
+from database import get_session, create_db_and_tables
+from models import RedeemCode, UserRedeemRecord
+import secrets
+
+app = FastAPI(
+    title="Linux.do OAuth2 Demo",
+    description="使用 Linux.do OAuth2 认证的 FastAPI 应用",
+    version="1.0.0",
+)
+
+# 用于存储 token 的简单内存存储（生产环境应使用数据库或 Redis）
+token_storage = {}
+
+
+@app.get("/", response_class=HTMLResponse)
+async def home():
+    """首页，显示登录链接"""
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Linux.do OAuth2 Demo</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                max-width: 800px;
+                margin: 50px auto;
+                padding: 20px;
+                background-color: #f5f5f5;
+            }
+            .container {
+                background-color: white;
+                padding: 30px;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            h1 {
+                color: #333;
+            }
+            .btn {
+                display: inline-block;
+                padding: 12px 24px;
+                background-color: #007bff;
+                color: white;
+                text-decoration: none;
+                border-radius: 4px;
+                margin-top: 20px;
+            }
+            .btn:hover {
+                background-color: #0056b3;
+            }
+            .info {
+                margin-top: 30px;
+                padding: 15px;
+                background-color: #e7f3ff;
+                border-left: 4px solid #007bff;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🚀 Linux.do OAuth2 登录演示</h1>
+            <p>这是一个使用 FastAPI 和 Linux.do OAuth2 认证的示例应用。</p>
+            <a href="/login" class="btn">使用 Linux.do 登录</a>
+            
+            <div class="info">
+                <h3>可用端点：</h3>
+                <ul>
+                    <li><code>GET /</code> - 首页</li>
+                    <li><code>GET /login</code> - 开始 OAuth2 登录流程</li>
+                    <li><code>GET /oauth2/callback</code> - OAuth2 回调处理</li>
+                    <li><code>GET /user</code> - 获取用户信息（需要 access_token）</li>
+                    <li><code>POST /refresh</code> - 刷新 access token（需要 refresh_token）</li>
+                    <li><code>GET /docs</code> - API 文档</li>
+                </ul>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return html_content
+
+
+@app.get("/login")
+async def login():
+    """开始 OAuth2 登录流程"""
+    # 生成随机 state 用于防止 CSRF 攻击
+    state = secrets.token_urlsafe(32)
+    # 在生产环境中，应该将 state 存储在 session 或 Redis 中进行验证
+
+    # 获取授权 URL
+    auth_url = oauth2_service.get_authorization_url(state=state)
+
+    # 重定向到 Linux.do 授权页面
+    return RedirectResponse(url=auth_url)
+
+
+@app.get("/oauth2/callback")
+async def oauth2_callback(
+    code: str = Query(..., description="授权码"),
+    state: str = Query(..., description="状态参数"),
+):
+    """
+    OAuth2 回调端点
+    处理从 Linux.do 返回的授权码
+    """
+    if not code:
+        raise HTTPException(status_code=400, detail="缺少授权码")
+
+    try:
+        # 使用授权码换取 token
+        token_data = await oauth2_service.exchange_code_for_token(code)
+
+        # 获取用户信息
+        user_info = await oauth2_service.get_user_info(token_data["access_token"])
+
+        # 存储 token（生产环境应使用更安全的方式）
+        user_id = user_info["id"]
+        token_storage[user_id] = token_data
+
+        # 直接重定向到兑换码页面，通过 URL 参数传递 user_id
+        return RedirectResponse(url=f"/redeem?user_id={user_id}")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"认证失败: {str(e)}")
+
+
+@app.get("/user")
+async def get_user_info(access_token: str = Query(..., description="访问令牌")):
+    """
+    获取用户信息
+
+    使用示例：
+    GET /user?access_token=YOUR_ACCESS_TOKEN
+    """
+    try:
+        user_info = await oauth2_service.get_user_info(access_token)
+        return {"success": True, "data": user_info}
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"获取用户信息失败: {str(e)}")
+
+
+@app.post("/refresh")
+async def refresh_token(refresh_token: str = Query(..., description="刷新令牌")):
+    """
+    刷新 access token
+
+    使用示例：
+    POST /refresh?refresh_token=YOUR_REFRESH_TOKEN
+    """
+    try:
+        token_data = await oauth2_service.refresh_access_token(refresh_token)
+        return {"success": True, "data": token_data}
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"刷新 token 失败: {str(e)}")
+
+
+@app.get("/health")
+async def health_check():
+    """健康检查端点"""
+    return {"status": "healthy", "service": "Linux.do OAuth2 Demo"}
+
+
+@app.post("/api/redeem/daily")
+async def claim_daily_code(
+    access_token: str = Query(..., description="访问令牌"),
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    每日领取兑换码
+
+    规则：
+    - 每个用户每天只能领取一次
+    - 兑换码从数据库中未使用的兑换码中随机分配
+    """
+    try:
+        # 获取用户信息
+        user_info = await oauth2_service.get_user_info(access_token)
+        user_id = user_info["id"]
+        username = user_info["username"]
+
+        # 检查今天是否已经领取过
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = today_start + timedelta(days=1)
+
+        existing_record = await session.execute(
+            select(UserRedeemRecord)
+            .where(UserRedeemRecord.user_id == user_id)
+            .where(UserRedeemRecord.redeemed_at >= today_start)
+            .where(UserRedeemRecord.redeemed_at < today_end)
+        )
+
+        if existing_record.scalar_one_or_none():
+            raise HTTPException(
+                status_code=400, detail="今天已经领取过兑换码了，请明天再来！"
+            )
+
+        # 获取一个未使用的兑换码
+        available_code = await session.execute(
+            select(RedeemCode).where(RedeemCode.is_used == False).limit(1)
+        )
+
+        code_obj = available_code.scalar_one_or_none()
+        if not code_obj:
+            raise HTTPException(status_code=404, detail="抱歉，兑换码已经发完了！")
+
+        # 标记兑换码为已使用
+        code_obj.is_used = True
+        code_obj.used_by = user_id
+        code_obj.used_at = datetime.now()
+
+        # 创建兑换记录
+        if code_obj.id is None:
+            raise HTTPException(status_code=500, detail="兑换码ID无效")
+
+        record = UserRedeemRecord(
+            user_id=user_id,
+            username=username,
+            redeem_code_id=code_obj.id,
+            code=code_obj.code,
+        )
+
+        session.add(record)
+        await session.commit()
+        await session.refresh(code_obj)
+        await session.refresh(record)
+
+        return {
+            "success": True,
+            "message": "领取成功！",
+            "data": {
+                "code": code_obj.code,
+                "redeemed_at": record.redeemed_at.isoformat(),
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"领取失败: {str(e)}")
+
+
+@app.get("/api/redeem/history")
+async def get_redeem_history(
+    access_token: str = Query(..., description="访问令牌"),
+    session: AsyncSession = Depends(get_session),
+):
+    """获取用户的兑换历史记录"""
+    try:
+        # 获取用户信息
+        user_info = await oauth2_service.get_user_info(access_token)
+        user_id = user_info["id"]
+
+        # 查询用户的兑换记录
+        from sqlalchemy import desc
+        from sqlmodel import col
+
+        records = await session.execute(
+            select(UserRedeemRecord)
+            .where(UserRedeemRecord.user_id == user_id)
+            .order_by(col(UserRedeemRecord.redeemed_at).desc())
+        )
+
+        history = []
+        for record in records.scalars().all():
+            history.append(
+                {"code": record.code, "redeemed_at": record.redeemed_at.isoformat()}
+            )
+
+        return {"success": True, "data": {"total": len(history), "history": history}}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取历史记录失败: {str(e)}")
+
+
+@app.get("/redeem", response_class=HTMLResponse)
+async def redeem_page(user_id: int = Query(None, description="用户ID")):
+    """兑换码领取页面"""
+
+    # 如果有 user_id，从内存中获取 token
+    access_token = ""
+    user_info_data = {}
+    if user_id and user_id in token_storage:
+        access_token = token_storage[user_id].get("access_token", "")
+        try:
+            user_info_data = await oauth2_service.get_user_info(access_token)
+        except:
+            pass
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>每日兑换码</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                max-width: 800px;
+                margin: 50px auto;
+                padding: 20px;
+                background-color: #f5f5f5;
+            }}
+            .container {{
+                background-color: white;
+                padding: 30px;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }}
+            h1 {{
+                color: #333;
+            }}
+            .btn {{
+                display: inline-block;
+                padding: 12px 24px;
+                background-color: #28a745;
+                color: white;
+                text-decoration: none;
+                border: none;
+                border-radius: 4px;
+                margin-top: 20px;
+                cursor: pointer;
+                font-size: 16px;
+            }}
+            .btn:hover {{
+                background-color: #218838;
+            }}
+            .btn:disabled {{
+                background-color: #6c757d;
+                cursor: not-allowed;
+            }}
+            .result {{
+                margin-top: 20px;
+                padding: 15px;
+                border-radius: 4px;
+                display: none;
+            }}
+            .result.success {{
+                background-color: #d4edda;
+                border: 1px solid #c3e6cb;
+                color: #155724;
+            }}
+            .result.error {{
+                background-color: #f8d7da;
+                border: 1px solid #f5c6cb;
+                color: #721c24;
+            }}
+            .code-display {{
+                font-size: 24px;
+                font-weight: bold;
+                margin: 15px 0;
+                padding: 15px;
+                background-color: #fff;
+                border: 2px dashed #28a745;
+                text-align: center;
+                border-radius: 4px;
+            }}
+            .history {{
+                margin-top: 30px;
+            }}
+            .history-item {{
+                padding: 10px;
+                margin: 5px 0;
+                background-color: #f8f9fa;
+                border-radius: 4px;
+                display: flex;
+                justify-content: space-between;
+            }}
+            .back-btn {{
+                background-color: #007bff;
+                margin-right: 10px;
+            }}
+            .back-btn:hover {{
+                background-color: #0056b3;
+            }}
+            .user-info {{
+                background-color: #e7f3ff;
+                padding: 15px;
+                border-radius: 4px;
+                margin-bottom: 20px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🎁 每日兑换码</h1>
+            {
+        f'''
+            <div class="user-info">
+                <p><strong>欢迎：</strong>{user_info_data.get("username", "未知用户")}</p>
+                <p><strong>信任等级：</strong>{user_info_data.get("trust_level", "N/A")}</p>
+            </div>
+            '''
+        if user_info_data
+        else '<p>每天可以领取一个兑换码，<a href="/login">点击登录</a></p>'
+    }
+            
+            <button class="btn" onclick="claimCode()" {
+        "" if access_token else 'disabled title="请先登录"'
+    }>领取今日兑换码</button>
+            <button class="btn back-btn" onclick="location.href='/'">返回首页</button>
+            
+            <div class="result" id="result"></div>
+            
+            <div class="history" id="history" style="display:none;">
+                <h2>📜 领取历史</h2>
+                <div id="history-list"></div>
+            </div>
+        </div>
+        
+        <script>
+            const accessToken = "{access_token}";
+            
+            async function claimCode() {{
+                const resultDiv = document.getElementById('result');
+                const btn = event.target;
+                
+                if (!accessToken) {{
+                    showResult('error', '请先<a href="/login">登录</a>！');
+                    return;
+                }}
+                
+                btn.disabled = true;
+                btn.textContent = '领取中...';
+                
+                try {{
+                    const response = await fetch(`/api/redeem/daily?access_token=${{encodeURIComponent(accessToken)}}`, {{
+                        method: 'POST'
+                    }});
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {{
+                        showResult('success', `
+                            <p>✅ ${{data.message}}</p>
+                            <div class="code-display">${{data.data.code}}</div>
+                            <p>领取时间：${{new Date(data.data.redeemed_at).toLocaleString('zh-CN')}}</p>
+                        `);
+                        loadHistory();
+                    }} else {{
+                        showResult('error', data.detail || '领取失败');
+                    }}
+                }} catch (error) {{
+                    showResult('error', '网络错误，请重试');
+                }} finally {{
+                    btn.disabled = false;
+                    btn.textContent = '领取今日兑换码';
+                }}
+            }}
+            
+            async function loadHistory() {{
+                if (!accessToken) return;
+                
+                try {{
+                    const response = await fetch(`/api/redeem/history?access_token=${{encodeURIComponent(accessToken)}}`);
+                    const data = await response.json();
+                    
+                    if (data.success && data.data.history.length > 0) {{
+                        const historyDiv = document.getElementById('history');
+                        const historyList = document.getElementById('history-list');
+                        
+                        historyList.innerHTML = data.data.history.map(item => `
+                            <div class="history-item">
+                                <span><strong>${{item.code}}</strong></span>
+                                <span>${{new Date(item.redeemed_at).toLocaleString('zh-CN')}}</span>
+                            </div>
+                        `).join('');
+                        
+                        historyDiv.style.display = 'block';
+                    }}
+                }} catch (error) {{
+                    console.error('加载历史记录失败:', error);
+                }}
+            }}
+            
+            function showResult(type, message) {{
+                const resultDiv = document.getElementById('result');
+                resultDiv.className = `result ${{type}}`;
+                resultDiv.innerHTML = message;
+                resultDiv.style.display = 'block';
+            }}
+            
+            // 页面加载时自动加载历史记录
+            window.onload = function() {{
+                if (accessToken) {{
+                    loadHistory();
+                }}
+            }};
+        </script>
+    </body>
+    </html>
+    """
+    return html_content
+
+
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时创建数据库表"""
+    create_db_and_tables()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
