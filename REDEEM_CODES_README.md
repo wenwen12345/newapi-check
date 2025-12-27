@@ -18,7 +18,29 @@
 uv sync
 ```
 
-### 2. 初始化数据库
+### 2. 配置环境变量
+
+复制 `.env.example` 文件为 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env` 文件，配置 New API 信息：
+
+```bash
+# New API 配置（必需）
+NEWAPI_SITE_URL=https://your-newapi-site.com
+NEWAPI_ACCESS_TOKEN=sk-your-access-token-here
+NEWAPI_REDEEM_QUOTA=500000  # 每次创建的兑换码额度（默认 500000 tokens）
+```
+
+**配置说明：**
+- `NEWAPI_SITE_URL`: 你的 New API 站点地址，例如 `https://api.example.com`
+- `NEWAPI_ACCESS_TOKEN`: 你的 New API 管理员 Access Token（需要管理员权限）
+- `NEWAPI_REDEEM_QUOTA`: 每次创建兑换码的额度，默认 500000 tokens
+
+### 3. 初始化数据库
 
 ```bash
 uv run python init_db.py
@@ -29,63 +51,8 @@ uv run python init_db.py
 开始初始化数据库...
 数据库初始化完成！
 已创建以下表：
-  - redeem_codes (兑换码表)
+  - redeem_codes (兑换码表 - 已废弃，保留用于历史记录)
   - user_redeem_records (用户兑换记录表)
-```
-
-### 3. 导入兑换码
-
-有三种方式导入兑换码：
-
-#### 方式一：生成示例兑换码（用于测试）
-
-```bash
-# 生成并导入 10 个示例兑换码
-uv run python import_codes.py --sample 10
-
-# 生成并导入 100 个示例兑换码
-uv run python import_codes.py --sample 100
-```
-
-输出示例：
-```
-🎲 生成 10 个示例兑换码...
-📝 准备导入 10 个兑换码
-✅ 成功导入 10 个兑换码
-```
-
-#### 方式二：从文件导入
-
-1. 创建一个文本文件（如 `codes.txt`），每行一个兑换码：
-```
-CODE-ABC123DEF456
-CODE-XYZ789GHI012
-CODE-JKL345MNO678
-```
-
-2. 导入：
-```bash
-uv run python import_codes.py codes.txt
-```
-
-输出示例：
-```
-📖 从文件中读取到 3 个兑换码
-✅ 成功导入 3 个兑换码
-
-📊 数据库统计:
-  - 总兑换码数: 3
-  - 已使用: 0
-  - 可用: 3
-```
-
-#### 方式三：在 Python 中导入
-
-```python
-from import_codes import import_codes_from_list
-
-codes = ["CODE-001", "CODE-002", "CODE-003"]
-import_codes_from_list(codes)
 ```
 
 ### 4. 启动应用
