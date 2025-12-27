@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     # New API 配置
     newapi_site_url: str = ""  # New API 站点地址，例如 https://api.example.com
     newapi_access_token: str = ""  # New API Access Token
+    newapi_user: str = ""  # New API 用户标识（用于 New-Api-User 头）
     newapi_redeem_quota: int = 500000  # 每次创建的兑换码额度（默认 500000 tokens）
 
     class Config:

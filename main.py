@@ -216,6 +216,7 @@ async def claim_daily_code(
         newapi_service = NewAPIService(
             base_url=settings.newapi_site_url,
             access_token=settings.newapi_access_token,
+            api_user=settings.newapi_user,
         )
 
         result = await newapi_service.create_redemption_code(

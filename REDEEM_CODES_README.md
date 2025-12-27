@@ -32,12 +32,14 @@ cp .env.example .env
 # New API 配置（必需）
 NEWAPI_SITE_URL=https://your-newapi-site.com
 NEWAPI_ACCESS_TOKEN=sk-your-access-token-here
+NEWAPI_USER=admin
 NEWAPI_REDEEM_QUOTA=500000  # 每次创建的兑换码额度（默认 500000 tokens）
 ```
 
 **配置说明：**
 - `NEWAPI_SITE_URL`: 你的 New API 站点地址，例如 `https://api.example.com`
 - `NEWAPI_ACCESS_TOKEN`: 你的 New API 管理员 Access Token（需要管理员权限）
+- `NEWAPI_USER`: New API 用户标识（用于 `New-Api-User` 请求头，通常是管理员用户名）
 - `NEWAPI_REDEEM_QUOTA`: 每次创建兑换码的额度，默认 500000 tokens
 
 ### 3. 初始化数据库

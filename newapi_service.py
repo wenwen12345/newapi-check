@@ -7,17 +7,30 @@ from typing import Optional, Dict, Any
 class NewAPIService:
     """New API 服务类"""
 
-    def __init__(self, base_url: str, access_token: str):
+    def __init__(
+        self, base_url: str, access_token: str, api_user: Optional[str] = None
+    ):
         """
         初始化 New API 服务
 
         Args:
             base_url: New API 站点地址，例如 https://api.example.com
             access_token: New API 访问令牌
+            api_user: New API 用户标识（用于 New-Api-User 头）
         """
         self.base_url = base_url.rstrip("/")
         self.access_token = access_token
-        self.headers = {"Authorization": f"Bearer {access_token}"}
+        self.api_user = api_user
+
+    def _get_headers(self) -> Dict[str, str]:
+        """获取请求头"""
+        headers: Dict[str, str] = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+        if self.api_user:
+            headers["New-Api-User"] = self.api_user
+        return headers
 
     async def create_redemption_code(
         self,
@@ -41,7 +54,7 @@ class NewAPIService:
         """
         url = f"{self.base_url}/api/redemption/"
 
-        payload = {
+        payload: Dict[str, Any] = {
             "quota": quota,
             "count": count,
         }
@@ -50,7 +63,7 @@ class NewAPIService:
             payload["name"] = name
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(url, json=payload, headers=self.headers)
+            response = await client.post(url, json=payload, headers=self._get_headers())
 
             if response.status_code == 200:
                 data = response.json()
@@ -78,7 +91,7 @@ class NewAPIService:
             # 尝试调用一个简单的 API 端点来验证连接
             url = f"{self.base_url}/api/status"
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(url, headers=self.headers)
+                response = await client.get(url, headers=self._get_headers())
                 return response.status_code in [200, 401, 403]  # 能连接上就算成功
         except:
             return False
@@ -88,19 +101,22 @@ class NewAPIService:
 _newapi_service: Optional[NewAPIService] = None
 
 
-def init_newapi_service(base_url: str, access_token: str) -> NewAPIService:
+def init_newapi_service(
+    base_url: str, access_token: str, api_user: Optional[str] = None
+) -> NewAPIService:
     """
     初始化全局 New API 服务实例
 
     Args:
         base_url: New API 站点地址
         access_token: New API 访问令牌
+        api_user: New API 用户标识
 
     Returns:
         New API 服务实例
     """
     global _newapi_service
-    _newapi_service = NewAPIService(base_url, access_token)
+    _newapi_service = NewAPIService(base_url, access_token, api_user)
     return _newapi_service
 
 
